@@ -142,6 +142,10 @@ class QuickFindGUI:
         ttk.Checkbutton(filters2, text="Dirs only", variable=self.dirs_only_var,
                         command=self._on_search_btn).pack(side=tk.LEFT, padx=5)
 
+        self.regex_var = tk.BooleanVar()
+        ttk.Checkbutton(filters2, text="Regex", variable=self.regex_var,
+                        command=self._on_search_btn).pack(side=tk.LEFT, padx=5)
+
         ttk.Separator(filters2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
         ttk.Label(filters2, text="Size:").pack(side=tk.LEFT)
@@ -478,6 +482,7 @@ class QuickFindGUI:
             max_size=max_size,
             modified_after=modified_after,
             modified_before=modified_before,
+            use_regex=self.regex_var.get(),
         )
 
         self.tree.delete(*self.tree.get_children())
