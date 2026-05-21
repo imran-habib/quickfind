@@ -180,11 +180,15 @@ class QuickFindGUI:
         self.auto_label.pack(side=tk.RIGHT)
 
         # Results treeview
-        tree_frame = ttk.Frame(self.root, padding=(10, 5))
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # --- Search Tab ---
+        search_tab = ttk.Frame(notebook)
+        notebook.add(search_tab, text="  Search  ")
 
         cols = ("name", "type", "size", "modified", "path")
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
+        self.tree = ttk.Treeview(search_tab, columns=cols, show="headings")
         self.tree.heading("name", text="Name ↕", command=lambda: self._sort_column("name"))
         self.tree.heading("type", text="Type ↕", command=lambda: self._sort_column("type"))
         self.tree.heading("size", text="Size ↕", command=lambda: self._sort_column("size"))
@@ -196,7 +200,7 @@ class QuickFindGUI:
         self.tree.column("modified", width=130)
         self.tree.column("path", width=350)
 
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar = ttk.Scrollbar(search_tab, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
 
         self.tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
@@ -204,6 +208,49 @@ class QuickFindGUI:
 
         # Double-click on column separator to auto-fit width
         self.tree.bind("<Double-1>", self._on_tree_double_click)
+
+        # --- Duplicates Tab ---
+        dup_tab = ttk.Frame(notebook)
+        notebook.add(dup_tab, text="  Duplicates  ")
+
+        dup_controls = ttk.Frame(dup_tab, padding=5)
+        dup_controls.pack(fill=tk.X)
+
+        self.scan_dup_btn = ttk.Button(dup_controls, text="🔍 Scan for Duplicates", command=self._scan_duplicates)
+        self.scan_dup_btn.pack(side=tk.LEFT, padx=2)
+
+        self.delete_dup_btn = ttk.Button(dup_controls, text="🗑 Delete Selected", command=self._delete_selected_dups, state=tk.DISABLED)
+        self.delete_dup_btn.pack(side=tk.LEFT, padx=2)
+
+        ttk.Button(dup_controls, text="Select All Except First", command=self._select_all_dups).pack(side=tk.LEFT, padx=2)
+        ttk.Button(dup_controls, text="Deselect All", command=self._deselect_all_dups).pack(side=tk.LEFT, padx=2)
+
+        self.dup_status_var = tk.StringVar(value="Click 'Scan for Duplicates' to start")
+        ttk.Label(dup_controls, textvariable=self.dup_status_var, foreground="gray").pack(side=tk.RIGHT, padx=5)
+
+        # Duplicates treeview with checkboxes
+        dup_cols = ("select", "name", "size", "path")
+        self.dup_tree = ttk.Treeview(dup_tab, columns=dup_cols, show="tree headings")
+        self.dup_tree.heading("#0", text="")
+        self.dup_tree.heading("select", text="✓")
+        self.dup_tree.heading("name", text="Name")
+        self.dup_tree.heading("size", text="Size")
+        self.dup_tree.heading("path", text="Path")
+        self.dup_tree.column("#0", width=30)
+        self.dup_tree.column("select", width=30, anchor=tk.CENTER)
+        self.dup_tree.column("name", width=200)
+        self.dup_tree.column("size", width=80, anchor=tk.E)
+        self.dup_tree.column("path", width=400)
+
+        dup_scroll = ttk.Scrollbar(dup_tab, orient=tk.VERTICAL, command=self.dup_tree.yview)
+        self.dup_tree.configure(yscrollcommand=dup_scroll.set)
+        self.dup_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        dup_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Click to toggle selection
+        self.dup_tree.bind("<ButtonRelease-1>", self._toggle_dup_select)
+        self._dup_selected = set()  # set of item IDs marked for deletion
+        self._dup_groups = []
 
         # Right-click context menu
         self.context_menu = Menu(self.root, tearoff=0)
@@ -544,6 +591,107 @@ class QuickFindGUI:
         elif val == "older than year":
             return None, now - 365 * day
         return None, None
+
+    # --- Duplicates ---
+    def _scan_duplicates(self):
+        """Scan for duplicate files using the index."""
+        from duplicates import find_duplicates
+        self.scan_dup_btn.config(state=tk.DISABLED)
+        self.dup_status_var.set("Scanning...")
+        self.dup_tree.delete(*self.dup_tree.get_children())
+        self._dup_selected.clear()
+
+        def do_scan():
+            def progress(stage, current, total):
+                self.root.after(0, lambda: self.dup_status_var.set(f"{stage} ({current:,})"))
+
+            groups = find_duplicates(callback=progress)
+            self.root.after(0, lambda: self._show_duplicates(groups))
+
+        threading.Thread(target=do_scan, daemon=True).start()
+
+    def _show_duplicates(self, groups):
+        self._dup_groups = groups
+        self.dup_tree.delete(*self.dup_tree.get_children())
+        self._dup_selected.clear()
+
+        total_wasted = 0
+        for i, group in enumerate(groups):
+            total_wasted += group.wasted_bytes
+            # Parent node for the group
+            group_id = self.dup_tree.insert("", tk.END, text="📋",
+                values=("", f"{len(group.files)} copies", format_size(group.size),
+                        f"Wasted: {format_size(group.wasted_bytes)}"))
+            # Child nodes for each file
+            for j, filepath in enumerate(group.files):
+                item_id = self.dup_tree.insert(group_id, tk.END, text="",
+                    values=("☐", os.path.basename(filepath), format_size(group.size), filepath))
+
+        self.scan_dup_btn.config(state=tk.NORMAL)
+        self.delete_dup_btn.config(state=tk.NORMAL if groups else tk.DISABLED)
+        self.dup_status_var.set(
+            f"Found {len(groups)} duplicate groups | Wasted: {format_size(total_wasted)}")
+
+    def _toggle_dup_select(self, event):
+        """Toggle selection on click."""
+        item = self.dup_tree.identify_row(event.y)
+        if not item:
+            return
+        parent = self.dup_tree.parent(item)
+        if not parent:  # clicked on group header, not a file
+            return
+
+        if item in self._dup_selected:
+            self._dup_selected.discard(item)
+            self.dup_tree.set(item, "select", "☐")
+        else:
+            self._dup_selected.add(item)
+            self.dup_tree.set(item, "select", "☑")
+
+    def _select_all_dups(self):
+        """Select all files except the first in each group."""
+        self._dup_selected.clear()
+        for group_id in self.dup_tree.get_children(""):
+            children = self.dup_tree.get_children(group_id)
+            for child in children[1:]:  # skip first (keep it)
+                self._dup_selected.add(child)
+                self.dup_tree.set(child, "select", "☑")
+            if children:
+                self.dup_tree.set(children[0], "select", "☐")
+
+    def _deselect_all_dups(self):
+        """Deselect all."""
+        for item in self._dup_selected:
+            self.dup_tree.set(item, "select", "☐")
+        self._dup_selected.clear()
+
+    def _delete_selected_dups(self):
+        """Delete selected duplicate files."""
+        if not self._dup_selected:
+            return
+
+        from duplicates import delete_files
+        from tkinter import messagebox
+
+        count = len(self._dup_selected)
+        if not messagebox.askyesno("Delete Duplicates",
+                f"Delete {count} selected files?\n\nThis cannot be undone."):
+            return
+
+        paths = [self.dup_tree.set(item, "path") for item in self._dup_selected]
+        deleted, failed = delete_files(paths)
+
+        # Remove deleted items from tree
+        for item in list(self._dup_selected):
+            self.dup_tree.delete(item)
+        self._dup_selected.clear()
+
+        # Remove empty groups
+        for group_id in self.dup_tree.get_children(""):
+            if len(self.dup_tree.get_children(group_id)) <= 1:
+                self.dup_tree.delete(group_id)
+
+        self.dup_status_var.set(f"Deleted {deleted} files" + (f", {failed} failed" if failed else ""))
 
     def _on_search_btn(self):
         self._on_search()
