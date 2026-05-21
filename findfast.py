@@ -192,7 +192,12 @@ def main():
     elif args.command == "stats":
         cmd_stats(args)
     else:
-        p.print_help()
+        # No command given — launch GUI (for double-click on Windows)
+        try:
+            from gui import launch_gui
+            launch_gui()
+        except ImportError:
+            p.print_help()
 
 
 if __name__ == "__main__":
