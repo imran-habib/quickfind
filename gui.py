@@ -1,5 +1,5 @@
 """
-QuickFind GUI - instant file search with system tray, hotkey, themes, and more.
+QuickFind GUI - instant file search with system tray, hotkey, auto-indexing.
 """
 import json
 import os
@@ -17,28 +17,6 @@ REINDEX_INTERVAL = 300
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".quickfind_config.json")
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quickfind.ico")
 
-# Theme colors
-THEMES = {
-    "light": {
-        "bg": "#ffffff",
-        "fg": "#1a1a1a",
-        "entry_bg": "#ffffff",
-        "tree_bg": "#ffffff",
-        "tree_fg": "#1a1a1a",
-        "select_bg": "#0078d4",
-        "status_fg": "#666666",
-    },
-    "dark": {
-        "bg": "#1e1e1e",
-        "fg": "#d4d4d4",
-        "entry_bg": "#2d2d2d",
-        "tree_bg": "#252526",
-        "tree_fg": "#cccccc",
-        "select_bg": "#264f78",
-        "status_fg": "#808080",
-    },
-}
-
 
 def load_config() -> dict:
     try:
@@ -53,11 +31,24 @@ def save_config(config: dict):
         json.dump(config, f)
 
 
+def get_all_drives():
+    """Detect all available drives/mount points."""
+    if os.name == "nt":
+        import string
+        drives = []
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\"
+            if os.path.exists(drive):
+                drives.append(drive)
+        return drives
+    else:
+        return ["/home", "/usr", "/opt", "/var"]
+
+
 class QuickFindGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.config = load_config()
-        self.theme = self.config.get("theme", "light")
         self._indexing = False
         self._auto_reindex_active = True
         self._tray_icon = None
@@ -66,11 +57,10 @@ class QuickFindGUI:
         self._restore_geometry()
         self._set_icon()
         self._build_ui()
-        self._apply_theme()
-        self._check_index()
-        self._start_auto_reindex()
         self._register_hotkey()
         self._update_title()
+        self._auto_index_on_first_launch()
+        self._start_auto_reindex()
 
     def _set_icon(self):
         if os.path.exists(ICON_PATH):
@@ -87,7 +77,6 @@ class QuickFindGUI:
 
     def _save_geometry(self):
         geo = self.root.geometry()
-        # Format: WxH+X+Y
         parts = geo.replace("+", " ").replace("x", " ").split()
         if len(parts) == 4:
             self.config["geometry"] = f"{parts[0]}x{parts[1]}"
@@ -106,8 +95,6 @@ class QuickFindGUI:
         self.root.config(menu=menubar)
 
         view_menu = Menu(menubar, tearoff=0)
-        view_menu.add_command(label="Toggle Theme", command=self._toggle_theme, accelerator="Ctrl+T")
-        view_menu.add_separator()
         view_menu.add_command(label="Minimize to Tray", command=self._minimize_to_tray)
         menubar.add_cascade(label="View", menu=view_menu)
 
@@ -121,11 +108,6 @@ class QuickFindGUI:
         self.entry = ttk.Entry(top, textvariable=self.search_var, font=("Segoe UI", 12))
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.entry.focus()
-
-        # Theme toggle button
-        self.theme_btn = ttk.Button(top, text="🌙" if self.theme == "light" else "☀️",
-                                    width=3, command=self._toggle_theme)
-        self.theme_btn.pack(side=tk.RIGHT)
 
         # Filter frame - Row 1
         filters = ttk.Frame(self.root, padding=(10, 0))
@@ -234,7 +216,6 @@ class QuickFindGUI:
         self.tree.bind("<Double-1>", self._on_double_click)
 
         # Keyboard shortcuts
-        self.root.bind("<Control-t>", lambda e: self._toggle_theme())
         self.root.bind("<Escape>", lambda e: self._minimize_to_tray())
         self.root.bind("<Return>", lambda e: self._open_file())
         self.root.bind("<Control-c>", self._keyboard_copy)
@@ -242,43 +223,17 @@ class QuickFindGUI:
         # Track sort state for column click toggling
         self._sort_reverse = {}
 
-    def _apply_theme(self):
-        colors = THEMES[self.theme]
-        style = ttk.Style()
-
-        # Whole window background
-        self.root.configure(bg=colors["bg"])
-
-        # Style all ttk widgets
-        style.configure(".", background=colors["bg"], foreground=colors["fg"])
-        style.configure("TFrame", background=colors["bg"])
-        style.configure("TLabel", background=colors["bg"], foreground=colors["fg"])
-        style.configure("TButton", background=colors["bg"])
-        style.configure("TCheckbutton", background=colors["bg"], foreground=colors["fg"])
-        style.configure("TEntry", fieldbackground=colors["entry_bg"], foreground=colors["fg"])
-        style.configure("TCombobox", fieldbackground=colors["entry_bg"], foreground=colors["fg"])
-        style.configure("TProgressbar", background=colors["select_bg"])
-
-        # Treeview
-        style.configure("Treeview",
-                        background=colors["tree_bg"],
-                        foreground=colors["tree_fg"],
-                        fieldbackground=colors["tree_bg"])
-        style.configure("Treeview.Heading",
-                        background=colors["bg"],
-                        foreground=colors["fg"])
-        style.map("Treeview", background=[("selected", colors["select_bg"])])
-
-        # Status labels
-        style.configure("Status.TLabel", background=colors["bg"], foreground=colors["status_fg"])
-
-        self.theme_btn.config(text="🌙" if self.theme == "light" else "☀️")
-
-    def _toggle_theme(self):
-        self.theme = "dark" if self.theme == "light" else "light"
-        self.config["theme"] = self.theme
-        save_config(self.config)
-        self._apply_theme()
+    # --- Auto-index on first launch ---
+    def _auto_index_on_first_launch(self):
+        """If no index exists, automatically index all drives."""
+        stats = get_stats()
+        if "error" in stats:
+            # No index — start indexing all drives immediately
+            drives = get_all_drives()
+            self.status_var.set(f"First launch — indexing {', '.join(drives)}...")
+            self._run_index(drives, incremental=False)
+        else:
+            self.status_var.set(f"Index: {stats['total_entries']:,} entries ({stats['files']:,} files, {stats['directories']:,} dirs)")
 
     # --- System Tray ---
     def _minimize_to_tray(self):
@@ -302,7 +257,6 @@ class QuickFindGUI:
             self._tray_icon = pystray.Icon("QuickFind", icon_img, "QuickFind", menu)
             threading.Thread(target=self._tray_icon.run, daemon=True).start()
         except ImportError:
-            # pystray not available, just minimize normally
             self.root.iconify()
 
     def _restore_from_tray(self, *args):
@@ -323,7 +277,7 @@ class QuickFindGUI:
             import keyboard
             keyboard.add_hotkey("ctrl+shift+f", self._hotkey_triggered)
         except ImportError:
-            pass  # keyboard module not available
+            pass
 
     def _hotkey_triggered(self):
         self.root.after(0, self._show_window)
@@ -334,13 +288,12 @@ class QuickFindGUI:
         self.root.focus_force()
         self.entry.focus()
 
-    # --- Context Menu ---
+    # --- Column sorting ---
     def _sort_column(self, col):
         """Sort treeview by clicking column header."""
         reverse = self._sort_reverse.get(col, False)
         items = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
 
-        # Smart sort: numeric for size, otherwise alphabetical
         if col == "size":
             def size_key(item):
                 val = item[0].strip()
@@ -362,7 +315,6 @@ class QuickFindGUI:
 
         self._sort_reverse[col] = not reverse
 
-        # Update header arrows
         for c in ("name", "size", "modified", "path"):
             arrow = ""
             if c == col:
@@ -370,11 +322,11 @@ class QuickFindGUI:
             self.tree.heading(c, text=c.capitalize() + arrow)
 
     def _keyboard_copy(self, event):
-        """Ctrl+C copies path if tree has focus, otherwise normal copy."""
         if self.tree.selection():
             self._copy_path()
             return "break"
 
+    # --- Context Menu ---
     def _show_context_menu(self, event):
         item = self.tree.identify_row(event.y)
         if item:
@@ -417,13 +369,6 @@ class QuickFindGUI:
         self._open_file()
 
     # --- Index ---
-    def _check_index(self):
-        stats = get_stats()
-        if "error" in stats:
-            self.status_var.set("No index. Click 'Index Folder...' to start.")
-        else:
-            self.status_var.set(f"Index: {stats['total_entries']:,} entries ({stats['files']:,} files, {stats['directories']:,} dirs)")
-
     def _update_progress(self, message, files_done, eta):
         def update():
             eta_str = ""
@@ -476,7 +421,7 @@ class QuickFindGUI:
             msg = f"Indexed {result['total_files']:,} files in {result['elapsed_seconds']}s"
 
         self.progress_label.config(text=msg)
-        self._check_index()
+        self.status_var.set(f"Index: {result['total_files']:,} files")
 
     def _start_auto_reindex(self):
         def auto_reindex():
@@ -500,7 +445,7 @@ class QuickFindGUI:
                                 text=f"Auto-update: +{r['new_files']} new, "
                                      f"{r['updated_files']} modified, "
                                      f"-{r['removed_files']} removed")
-                            self._check_index()
+                            self.status_var.set(f"Index: {r['total_files']:,} files")
 
                         self.root.after(0, done)
 
@@ -519,10 +464,7 @@ class QuickFindGUI:
         if ext and not ext.startswith("."):
             ext = "." + ext
 
-        # Parse size filter
         min_size, max_size = self._parse_size_filter()
-
-        # Parse date filter
         modified_after, modified_before = self._parse_date_filter()
 
         result = search(
@@ -544,10 +486,10 @@ class QuickFindGUI:
             self.status_var.set(f"Error: {result['error']}")
             return
 
+        from datetime import datetime
         for r in result["results"]:
             icon = "📁 " if r.is_dir else ""
             size = "" if r.is_dir else format_size(r.size)
-            from datetime import datetime
             mod_date = datetime.fromtimestamp(r.modified).strftime("%Y-%m-%d %H:%M") if r.modified else ""
             self.tree.insert("", tk.END, values=(
                 f"{icon}{r.name}", size, mod_date, os.path.dirname(r.path)
@@ -558,7 +500,6 @@ class QuickFindGUI:
         self.status_var.set(f"{result['count']} results in {result['elapsed_ms']}ms")
 
     def _parse_size_filter(self):
-        """Convert size filter dropdown to min/max bytes."""
         val = self.size_filter_var.get()
         sizes = {"1 KB": 1024, "1 MB": 1024**2, "10 MB": 10*1024**2, "100 MB": 100*1024**2}
         if val.startswith("<"):
@@ -568,7 +509,6 @@ class QuickFindGUI:
         return None, None
 
     def _parse_date_filter(self):
-        """Convert date filter dropdown to timestamps."""
         import datetime
         val = self.date_filter_var.get()
         now = time.time()
