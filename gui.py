@@ -816,6 +816,12 @@ class QuickFindGUI:
 
 def launch_gui():
     app = QuickFindGUI()
+    # Wire single-instance show callback
+    try:
+        import quickfind
+        quickfind._show_cb = lambda: app.root.after(0, app._show_window)
+    except (ImportError, AttributeError):
+        pass
     app.run()
 
 

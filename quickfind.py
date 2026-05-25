@@ -198,7 +198,18 @@ def main():
     else:
         # No command given — launch GUI (for double-click on Windows)
         try:
-            from gui import launch_gui
+            import atexit
+            from single_instance import ensure_single_instance, cleanup_lock
+
+            _show_cb = None
+            def _on_show():
+                if _show_cb:
+                    _show_cb()
+
+            ensure_single_instance("quickfind", on_show_callback=_on_show)
+            atexit.register(cleanup_lock, "quickfind")
+
+            from gui import launch_gui, QuickFindGUI
             launch_gui()
         except ImportError:
             p.print_help()
